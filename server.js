@@ -11,6 +11,17 @@ const {
   getStats,
   recordJobCreated,
   recordLecturesCompleted,
+  saveJob,
+  updateJobFields,
+  loadJob,
+  deleteJob,
+  enqueueJobId,
+  removeJobFromQueue,
+  loadQueuedJobIds,
+  clearQueue,
+  setDedupKey,
+  getDedupKey,
+  deleteDedupKey,
 } = require("./lib/redis");
 
 const app = express();
@@ -65,6 +76,8 @@ function drainQueue() {
 
   job.status = "processing";
   job.position = 0;
+  removeJobFromQueue(jobId).catch(() => {});
+  updateJobFields(jobId, { status: "processing", position: 0 }).catch(() => {});
   push(jobId, "status", { status: "processing" });
   activeJobs++;
 
@@ -85,6 +98,17 @@ function drainQueue() {
       activeJobs--;
       job.status = result.success ? "done" : "failed";
       job.result = result;
+
+      // Persist final state (includes logs captured so far)
+      updateJobFields(jobId, {
+        status: job.status,
+        result: job.result,
+        logs:   job.logs,
+        total:      job.total,
+        processed:  job.processed,
+        progress:   job.progress,
+      }).catch(() => {});
+      deleteDedupKey(job.dedupKey).catch(() => {});
 
       if (result.success) {
         recordLecturesCompleted(result.completed).catch(() => {});
@@ -108,6 +132,7 @@ function drainQueue() {
       setTimeout(() => {
         jobs.delete(jobId);
         sseConnections.delete(jobId);
+        deleteJob(jobId).catch(() => {});
       }, 3_600_000);
 
       drainQueue();
@@ -115,6 +140,8 @@ function drainQueue() {
     .catch((err) => {
       activeJobs--;
       job.status = "failed";
+      updateJobFields(jobId, { status: "failed" }).catch(() => {});
+      deleteDedupKey(job.dedupKey).catch(() => {});
       push(jobId, "failed", { message: "Unexpected server error. Try again." });
       config.email = null;
       config.password = null;
@@ -142,7 +169,7 @@ const submitLimit = rateLimit({
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 // POST /api/submit  — enqueue a new job
-app.post("/api/submit", submitLimit, (req, res) => {
+app.post("/api/submit", submitLimit, async (req, res) => {
   const { email, password, courseSlug } = req.body ?? {};
 
   if (!email || !password || !courseSlug) {
@@ -168,11 +195,19 @@ app.post("/api/submit", submitLimit, (req, res) => {
       .json({ error: "Invalid course slug. Use letters, numbers, and hyphens only." });
   }
 
-  // Dedup: return existing active job for same user+course
+  // Dedup: check in-memory first, then Redis (survives restarts)
   const dedupKey = `${email.toLowerCase()}:${courseSlug.toLowerCase()}`;
-  const existingId = activeJobKeys.get(dedupKey);
+  let existingId = activeJobKeys.get(dedupKey);
+  if (!existingId) {
+    existingId = await getDedupKey(dedupKey).catch(() => null);
+  }
   if (existingId) {
-    const existing = jobs.get(existingId);
+    let existing = jobs.get(existingId);
+    if (!existing) {
+      // Restore from Redis if it was evicted from memory
+      existing = await loadJob(existingId).catch(() => null);
+      if (existing) jobs.set(existingId, existing);
+    }
     if (existing && (existing.status === "queued" || existing.status === "processing")) {
       return res.json({ jobId: existingId, position: existing.position, existing: true });
     }
@@ -199,13 +234,19 @@ app.post("/api/submit", submitLimit, (req, res) => {
   recordJobCreated().catch(() => {});
 
   queue.push({ jobId, config: { email, password, courseSlug } });
+
+  // Persist job state and queue position to Redis (credentials are NOT stored)
+  saveJob(jobId, jobs.get(jobId)).catch(() => {});
+  enqueueJobId(jobId).catch(() => {});
+  setDedupKey(dedupKey, jobId).catch(() => {});
+
   drainQueue();
 
   res.json({ jobId, position });
 });
 
 // GET /api/status/:jobId  — SSE stream for real-time progress
-app.get("/api/status/:jobId", (req, res) => {
+app.get("/api/status/:jobId", async (req, res) => {
   const { jobId } = req.params;
 
   // Validate UUID v4 format to prevent enumeration probing
@@ -213,7 +254,12 @@ app.get("/api/status/:jobId", (req, res) => {
     return res.status(400).json({ error: "Invalid job ID format." });
   }
 
-  const job = jobs.get(jobId);
+  let job = jobs.get(jobId);
+  if (!job) {
+    // Fallback: try loading from Redis (e.g. after server restart)
+    job = await loadJob(jobId).catch(() => null);
+    if (job) jobs.set(jobId, job);
+  }
   if (!job) {
     return res.status(404).json({ error: "Job not found or has expired (jobs live for 1 hour)." });
   }
@@ -272,9 +318,39 @@ app.get("/api/queue", (_req, res) => {
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
+
+/**
+ * On startup, reload any jobs that were queued/processing before the last
+ * restart and immediately mark them as failed — credentials are ephemeral and
+ * were never persisted to Redis, so these jobs cannot be resumed.
+ * Users will see "Server was restarted" when they reconnect via SSE.
+ */
+async function restoreQueueFromRedis() {
+  const queuedIds = await loadQueuedJobIds().catch(() => []);
+  if (queuedIds.length === 0) return;
+
+  console.log(`[queue] Recovering ${queuedIds.length} job(s) from previous session...`);
+  const failedResult = { success: false, error: "Server was restarted. Please resubmit your request." };
+
+  for (const jobId of queuedIds) {
+    const job = await loadJob(jobId).catch(() => null);
+    if (!job) continue;
+
+    // Restore into in-memory map as failed so SSE reconnects get the right state
+    jobs.set(jobId, { ...job, status: "failed", result: failedResult });
+    updateJobFields(jobId, { status: "failed", result: failedResult }).catch(() => {});
+    if (job.dedupKey) deleteDedupKey(job.dedupKey).catch(() => {});
+  }
+
+  // The queue list is now stale — wipe it so new jobs start clean
+  await clearQueue().catch(() => {});
+  console.log(`[queue] ${queuedIds.length} job(s) marked as failed (no credentials after restart).`);
+}
+
 app.listen(PORT, () => {
   console.log(`\n🛸  VTU Autopilot is live → http://localhost:${PORT}`);
   console.log(`    VTU: "Please watch all 166 lectures."`);
   console.log(`    Us:  "No."\n`);
   ensureSeed().catch(e => console.warn("[redis] seed failed:", e.message));
+  restoreQueueFromRedis().catch(e => console.warn("[queue] restore failed:", e.message));
 });
