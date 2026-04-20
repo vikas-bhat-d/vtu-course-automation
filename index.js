@@ -1,3 +1,11 @@
+/**
+ * CLI Tool for VTU Course Automation
+ * ⚠️  CREDENTIALS REQUIRED: VTU_EMAIL and VTU_PASSWORD must be set in .env
+ * 
+ * Note: The server (server.js) does NOT require credentials in .env
+ * It accepts them via API request body for web/programmatic usage.
+ */
+
 const axios = require("axios");
 const { wrapper } = require("axios-cookiejar-support");
 const tough = require("tough-cookie");
@@ -19,10 +27,20 @@ let skippedCount = 0;
 
 /**
  * Login to the platform and store the session cookie
+ * ⚠️  CLI-ONLY: Credentials must be in .env file
  */
 async function login() {
     if (!EMAIL || !PASSWORD) {
-        console.error("✗ Missing credentials in .env file (VTU_EMAIL, VTU_PASSWORD)");
+        console.error("\n" + "=".repeat(60));
+        console.error("✗ ERROR: Missing credentials");
+        console.error("=".repeat(60));
+        console.error("This CLI tool requires VTU_EMAIL and VTU_PASSWORD in .env\n");
+        console.error("📝 Set up your .env file:");
+        console.error("   VTU_EMAIL=your-email@gmail.com");
+        console.error("   VTU_PASSWORD=your-password\n");
+        console.error("💡 TIP: Use the web server (npm run serve) instead if you");
+        console.error("   don't want to store credentials. Pass them via API.\n");
+        console.error("=".repeat(60));
         process.exit(1);
     }
 
@@ -278,6 +296,22 @@ function sleep(ms) {
  * Main execution
  */
 async function run() {
+    // CLI-ONLY: Validate credentials are set
+    if (!EMAIL || !PASSWORD) {
+        console.error("\n" + "=".repeat(60));
+        console.error("✗ CLI Tool Error: Missing Credentials");
+        console.error("=".repeat(60));
+        console.error("This CLI requires VTU_EMAIL and VTU_PASSWORD in .env\n");
+        console.error("If you're running the web server:");
+        console.error("  → Use: npm run serve");
+        console.error("  → Credentials are passed via API request body\n");
+        console.error("For CLI usage, set in .env:");
+        console.error("  VTU_EMAIL=your-email@gmail.com");
+        console.error("  VTU_PASSWORD=your-password");
+        console.error("=".repeat(60) + "\n");
+        process.exit(1);
+    }
+
     console.log("========================================");
     console.log("   VTU Lecture Progress Automation");
     console.log("========================================");
