@@ -1,20 +1,31 @@
 {
-  "name": "vtu.internyet-automation",
-  "version": "1.0.0",
-  "description": "",
+  "name": "vtu-autopilot",
+  "version": "2.0.0",
+  "description": "Auto-complete VTU online courses. Because 166 lectures is not it.",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start":"node index.js"
+    "start": "node index.js",
+    "serve": "node server.js",
+    "dev": "node --watch server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "vtu",
+    "automation",
+    "education"
+  ],
+  "author": "Vikas Bhat D",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
+    "@upstash/redis": "^1.37.0",
     "axios": "^1.15.0",
     "axios-cookiejar-support": "^6.0.5",
+    "cors": "^2.8.6",
     "dotenv": "^16.0.3",
-    "tough-cookie": "^6.0.1"
+    "express": "^4.22.1",
+    "express-rate-limit": "^7.5.1",
+    "tough-cookie": "^6.0.1",
+    "uuid": "^9.0.1"
   }
 }
