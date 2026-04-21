@@ -121,7 +121,7 @@ async function runAutomation(
         // Zero duration — VTU has no watchable content here; skip permanently.
         if (!isRetry) {
           skipped++;
-          emit("lecture_done", { idx, total, title: lec.title, status: "skip", completed, skipped });
+          emit("lecture_done", { idx, total, title: lec.title, status: "skip", reason: "VTU reported zero duration — no video content available for this lecture", completed, skipped });
         }
         return;
       }
@@ -153,13 +153,19 @@ async function runAutomation(
         skipped++;
         retryable.push({ lec, idx });
       }
-      emit("lecture_done", { idx, total, title: lec.title, status: "maxed", completed, skipped, retry: isRetry });
+      const maxedReason = isRetry
+        ? `Still not marked complete after ${maxAttempts} attempts on retry — VTU may not be accepting progress for this lecture`
+        : `Did not reach 100% after ${maxAttempts} progress attempts — will retry`;
+      emit("lecture_done", { idx, total, title: lec.title, status: "maxed", reason: maxedReason, completed, skipped, retry: isRetry });
     } catch (err) {
       if (!isRetry) {
         skipped++;
         retryable.push({ lec, idx });
       }
-      emit("lecture_done", { idx, total, title: lec.title, status: "error", error: err.message, completed, skipped, retry: isRetry });
+      const errReason = isRetry
+        ? `Request failed on retry: ${err.message}`
+        : `Request failed: ${err.message} — will retry`;
+      emit("lecture_done", { idx, total, title: lec.title, status: "error", reason: errReason, completed, skipped, retry: isRetry });
     }
   }
 

@@ -1454,10 +1454,15 @@
         const retryTag = data.retry ? " [retry]" : "";
         if (data.status === "done")
           appendLog(`[${data.idx}/${jobTotal}] ${data.title}${retryTag}`, "success");
-        else if (data.status === "skip" || data.status === "maxed")
-          appendLog(`[${data.idx}/${jobTotal}] Skipped: ${data.title}${retryTag}`, "warn");
-        else if (data.status === "error")
-          appendLog(`[${data.idx}/${jobTotal}] Error: ${data.title}${retryTag}`, "error");
+        else if (data.status === "skip")
+          appendLog(`[${data.idx}/${jobTotal}] Skipped: ${data.title} — ${data.reason}`, "warn");
+        else if (data.status === "maxed") {
+          const level = data.retry ? "error" : "warn";
+          appendLog(`[${data.idx}/${jobTotal}] Skipped: ${data.title} — ${data.reason}`, level);
+        } else if (data.status === "error") {
+          const level = data.retry ? "error" : "warn";
+          appendLog(`[${data.idx}/${jobTotal}] ${data.title} — ${data.reason}`, level);
+        }
         break;
       }
       case "complete": case "done": if (!isReplay) onComplete(data); break;
