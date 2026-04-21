@@ -4,6 +4,8 @@
 
 **VTU Autopilot** automates marking VTU online course lectures as complete — parallel processing, smart retries, real-time progress, and a clean web UI.
 
+[![View Live](https://img.shields.io/badge/View%20Live-https%3A%2F%2Fvtu--autopilot.up.railway.app-blue?style=for-the-badge&logo=railway)](https://vtu-autopilot.up.railway.app/)
+
 ---
 
 ## Table of Contents
