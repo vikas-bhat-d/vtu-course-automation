@@ -77,9 +77,12 @@ function drainQueue() {
   job.status = "processing";
   job.position = 0;
   removeJobFromQueue(jobId).catch(() => {});
+  // Refresh TTL from "now" so a job that waited a long time in queue
+  // doesn't expire in Redis before it finishes processing.
   updateJobFields(jobId, { status: "processing", position: 0 }).catch(() => {});
   push(jobId, "status", { status: "processing" });
   activeJobs++;
+  drainQueue(); // fill any remaining concurrent slots
 
   // Shared cleanup — called from both .then() and .catch()
   function scheduleJobExpiry() {
@@ -143,7 +146,8 @@ function drainQueue() {
     .catch((err) => {
       activeJobs--;
       job.status = "failed";
-      updateJobFields(jobId, { status: "failed" }).catch(() => {});
+      job.result = { success: false, error: "Unexpected server error. Try again." };
+      updateJobFields(jobId, { status: "failed", result: job.result }).catch(() => {});
       deleteDedupKey(job.dedupKey).catch(() => {});
       push(jobId, "failed", { message: "Unexpected server error. Try again." });
       config.email = null;
