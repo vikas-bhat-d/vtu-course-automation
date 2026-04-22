@@ -36,7 +36,6 @@ const GITHUB_URL =
 // These can be changed at runtime via PATCH /api/admin/config without redeploying.
 const runtimeConfig = {
   maxConcurrent:  parseInt(process.env.MAX_CONCURRENT)       || 2,
-  queueSizeLimit: parseInt(process.env.QUEUE_SIZE_LIMIT)     || 50,
   batchSize:      parseInt(process.env.DEFAULT_BATCH_SIZE)   || 10,
   maxAttempts:    parseInt(process.env.DEFAULT_MAX_ATTEMPTS) || 50,
   retryDelay:     parseInt(process.env.RETRY_DELAY_MS)       || 2000,
@@ -222,11 +221,6 @@ app.post("/api/submit", submitLimit, async (req, res) => {
       .json({ error: "Invalid course slug. Use letters, numbers, and hyphens only." });
   }
 
-  // Queue size guard — reject new submissions when the queue is full
-  if (queue.length >= runtimeConfig.queueSizeLimit) {
-    return res.status(503).json({ error: "The queue is currently full. Please try again later." });
-  }
-
   // Dedup: check in-memory first, then Redis (survives restarts)
   const dedupKey = `${email.toLowerCase()}:${courseSlug.toLowerCase()}`;
   let existingId = activeJobKeys.get(dedupKey);
@@ -389,7 +383,6 @@ const adminLimit = rateLimit({
 // Allowed keys with their [min, max] bounds
 const CONFIG_BOUNDS = {
   maxConcurrent:  [1, 10],
-  queueSizeLimit: [1, 500],
   batchSize:      [1, 50],
   maxAttempts:    [1, 500],
   retryDelay:     [0, 30_000],
