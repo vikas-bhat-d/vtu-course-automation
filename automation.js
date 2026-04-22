@@ -6,6 +6,11 @@ const tough = require("tough-cookie");
 
 const VTU_API = "https://online.vtu.ac.in/api/v1";
 
+/** Pause execution for `ms` milliseconds. */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Run the full VTU course automation for a given user/course.
  *
@@ -19,7 +24,7 @@ const VTU_API = "https://online.vtu.ac.in/api/v1";
  * @returns {Promise<{success: boolean, completed: number, skipped: number, total: number, error?: string}>}
  */
 async function runAutomation(
-  { email, password, courseSlug, batchSize = 10, maxAttempts = 50 },
+  { email, password, courseSlug, batchSize = 10, maxAttempts = 50, retryDelay = 2000, requestDelay = 500 },
   onProgress
 ) {
   const emit = (type, data) => { try { onProgress?.(type, data); } catch (_) {} };
@@ -46,6 +51,13 @@ async function runAutomation(
       if (retry && (s === 401 || s === 419 || s === 403)) {
         sessionValid = false;
         await login();
+        return request(cfg, false);
+      }
+      // VTU server is overloaded — back off and retry once before propagating
+      if (retry && (s === 500 || s === 503 || s === 429)) {
+        const wait = retryDelay > 0 ? retryDelay : 2000;
+        emit("log", { text: `⚠ VTU returned ${s} — waiting ${wait}ms before retry...`, level: "warn" });
+        await sleep(wait);
         return request(cfg, false);
       }
       throw err;
@@ -138,6 +150,8 @@ async function runAutomation(
       };
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // Throttle requests so VTU's server is not hammered
+        if (requestDelay > 0) await sleep(requestDelay);
         const r = await request({
           method: "POST",
           url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}/progress`,

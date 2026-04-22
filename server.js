@@ -2,6 +2,7 @@
 
 const express = require("express");
 const cors    = require("cors");
+const crypto  = require("crypto");
 const { v4: uuidv4 } = require("uuid");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
@@ -31,6 +32,17 @@ const GITHUB_URL =
   process.env.GITHUB_URL || "https://github.com/vikas-bhat-d/vtu-course-automation";
 
 
+// ── Runtime-configurable settings ────────────────────────────────────────────
+// These can be changed at runtime via PATCH /api/admin/config without redeploying.
+const runtimeConfig = {
+  maxConcurrent:  parseInt(process.env.MAX_CONCURRENT)       || 2,
+  queueSizeLimit: parseInt(process.env.QUEUE_SIZE_LIMIT)     || 50,
+  batchSize:      parseInt(process.env.DEFAULT_BATCH_SIZE)   || 10,
+  maxAttempts:    parseInt(process.env.DEFAULT_MAX_ATTEMPTS) || 50,
+  retryDelay:     parseInt(process.env.RETRY_DELAY_MS)       || 2000,
+  requestDelay:   parseInt(process.env.REQUEST_DELAY_MS)     || 500,
+};
+
 // ── In-memory job store ──────────────────────────────────────────────────────
 // Each job: { id, status, position, logs[], total, processed, progress, createdAt, result? }
 const jobs = new Map();
@@ -45,7 +57,6 @@ const sseConnections = new Map();
 const activeJobKeys = new Map();
 
 let activeJobs = 0;
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT) || 2;
 
 // ── SSE helper ───────────────────────────────────────────────────────────────
 function push(jobId, event, data) {
@@ -59,7 +70,7 @@ function push(jobId, event, data) {
 
 // ── Queue worker ─────────────────────────────────────────────────────────────
 function drainQueue() {
-  if (activeJobs >= MAX_CONCURRENT || queue.length === 0) return;
+  if (activeJobs >= runtimeConfig.maxConcurrent || queue.length === 0) return;
 
   const { jobId, config } = queue.shift();
   const job = jobs.get(jobId);
@@ -93,7 +104,15 @@ function drainQueue() {
     }, 3_600_000);
   }
 
-  runAutomation(config, (type, data) => {
+  // Merge runtime-configurable settings at execution time so that any
+  // admin changes made while the job was queued are picked up immediately.
+  runAutomation({
+    ...config,
+    batchSize:    runtimeConfig.batchSize,
+    maxAttempts:  runtimeConfig.maxAttempts,
+    retryDelay:   runtimeConfig.retryDelay,
+    requestDelay: runtimeConfig.requestDelay,
+  }, (type, data) => {
     // Keep a rolling 200-entry log for late-joiners to replay
     job.logs.push({ type, data, ts: Date.now() });
     if (job.logs.length > 200) job.logs.shift();
@@ -203,6 +222,11 @@ app.post("/api/submit", submitLimit, async (req, res) => {
       .json({ error: "Invalid course slug. Use letters, numbers, and hyphens only." });
   }
 
+  // Queue size guard — reject new submissions when the queue is full
+  if (queue.length >= runtimeConfig.queueSizeLimit) {
+    return res.status(503).json({ error: "The queue is currently full. Please try again later." });
+  }
+
   // Dedup: check in-memory first, then Redis (survives restarts)
   const dedupKey = `${email.toLowerCase()}:${courseSlug.toLowerCase()}`;
   let existingId = activeJobKeys.get(dedupKey);
@@ -241,7 +265,7 @@ app.post("/api/submit", submitLimit, async (req, res) => {
   // Fire-and-forget: increment student counter in Redis
   recordJobCreated().catch(() => {});
 
-  queue.push({ jobId, config: { email, password, courseSlug } });
+  queue.push({ jobId, config: { email, password, courseSlug } }); // runtime settings injected at execution time
 
   // Persist job state and queue position to Redis (credentials are NOT stored)
   saveJob(jobId, jobs.get(jobId)).catch(() => {});
@@ -326,7 +350,86 @@ app.get("/api/queue", (_req, res) => {
   res.json({ queued: queue.length, processing: activeJobs, total: queue.length + activeJobs });
 });
 
-// ── Start ────────────────────────────────────────────────────────────────────
+// ── Admin — password-protected config management ──────────────────────────────
+// Set ADMIN_PASSWORD in your .env to enable these routes.
+
+/** Timing-safe string comparison to prevent timing attacks on the password check. */
+function safeCompare(a, b) {
+  try {
+    const bufA = Buffer.from(String(a), "utf8");
+    const bufB = Buffer.from(String(b), "utf8");
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
+function adminAuth(req, res, next) {
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminPassword) {
+    return res.status(503).json({ error: "Admin access is not configured (ADMIN_PASSWORD not set in env)." });
+  }
+  const auth = req.headers.authorization ?? "";
+  const provided = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!provided || !safeCompare(provided, adminPassword)) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+  next();
+}
+
+// Strict rate limiter for admin endpoints to prevent brute-force
+const adminLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many admin requests." },
+});
+
+// Allowed keys with their [min, max] bounds
+const CONFIG_BOUNDS = {
+  maxConcurrent:  [1, 10],
+  queueSizeLimit: [1, 500],
+  batchSize:      [1, 50],
+  maxAttempts:    [1, 500],
+  retryDelay:     [0, 30_000],
+  requestDelay:   [0, 10_000],
+};
+
+// GET /api/admin/config  — view current runtime config
+app.get("/api/admin/config", adminLimit, adminAuth, (_req, res) => {
+  res.json({ config: runtimeConfig, bounds: CONFIG_BOUNDS });
+});
+
+// PATCH /api/admin/config  — update one or more runtime config values
+app.patch("/api/admin/config", adminLimit, adminAuth, (req, res) => {
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+    return res.status(400).json({ error: "Request body must be a JSON object." });
+  }
+
+  const updates = {};
+  for (const key of Object.keys(req.body)) {
+    if (!(key in CONFIG_BOUNDS)) {
+      return res.status(400).json({ error: `Unknown config key: "${key}". Allowed: ${Object.keys(CONFIG_BOUNDS).join(", ")}.` });
+    }
+    const val = Number(req.body[key]);
+    if (!Number.isInteger(val)) {
+      return res.status(400).json({ error: `"${key}" must be an integer.` });
+    }
+    const [min, max] = CONFIG_BOUNDS[key];
+    if (val < min || val > max) {
+      return res.status(400).json({ error: `"${key}" must be between ${min} and ${max}.` });
+    }
+    updates[key] = val;
+  }
+
+  Object.assign(runtimeConfig, updates);
+  console.log("[admin] Config updated:", updates);
+  res.json({ message: "Config updated successfully.", config: runtimeConfig });
+});
+
+
 
 /**
  * On startup, reload any jobs that were queued/processing before the last
