@@ -370,8 +370,7 @@ function adminAuth(req, res, next) {
   if (!adminPassword) {
     return res.status(503).json({ error: "Admin access is not configured (ADMIN_PASSWORD not set in env)." });
   }
-  const auth = req.headers.authorization ?? "";
-  const provided = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const provided = String(req.query.password ?? "");
   if (!provided || !safeCompare(provided, adminPassword)) {
     return res.status(401).json({ error: "Unauthorized." });
   }
@@ -397,23 +396,17 @@ const CONFIG_BOUNDS = {
   requestDelay:   [0, 10_000],
 };
 
-// GET /api/admin/config  — view current runtime config
-app.get("/api/admin/config", adminLimit, adminAuth, (_req, res) => {
-  res.json({ config: runtimeConfig, bounds: CONFIG_BOUNDS });
-});
-
-// PATCH /api/admin/config  — update one or more runtime config values
-app.patch("/api/admin/config", adminLimit, adminAuth, (req, res) => {
-  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
-    return res.status(400).json({ error: "Request body must be a JSON object." });
-  }
-
+// GET /api/admin/config?password=<pw>[&key=value...]
+// Returns current config. If any config keys are also present as query params,
+// validates and applies them first, then returns the updated config.
+app.get("/api/admin/config", adminLimit, adminAuth, (req, res) => {
   const updates = {};
-  for (const key of Object.keys(req.body)) {
+  for (const key of Object.keys(req.query)) {
+    if (key === "password") continue; // not a config key
     if (!(key in CONFIG_BOUNDS)) {
       return res.status(400).json({ error: `Unknown config key: "${key}". Allowed: ${Object.keys(CONFIG_BOUNDS).join(", ")}.` });
     }
-    const val = Number(req.body[key]);
+    const val = Number(req.query[key]);
     if (!Number.isInteger(val)) {
       return res.status(400).json({ error: `"${key}" must be an integer.` });
     }
@@ -424,9 +417,12 @@ app.patch("/api/admin/config", adminLimit, adminAuth, (req, res) => {
     updates[key] = val;
   }
 
-  Object.assign(runtimeConfig, updates);
-  console.log("[admin] Config updated:", updates);
-  res.json({ message: "Config updated successfully.", config: runtimeConfig });
+  if (Object.keys(updates).length > 0) {
+    Object.assign(runtimeConfig, updates);
+    console.log("[admin] Config updated:", updates);
+  }
+
+  res.json({ config: runtimeConfig, bounds: CONFIG_BOUNDS });
 });
 
 
