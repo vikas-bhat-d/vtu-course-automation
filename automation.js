@@ -53,10 +53,10 @@ async function runAutomation(
         await login();
         return request(cfg, false);
       }
-      // VTU server is overloaded — back off and retry once before propagating
+      // VTU server is overloaded — back off and retry once silently
       if (retry && (s === 500 || s === 503 || s === 429)) {
         const wait = retryDelay > 0 ? retryDelay : 2000;
-        emit("log", { text: `⚠ VTU returned ${s} — waiting ${wait}ms before retry...`, level: "warn" });
+        console.warn(`[vtu] ${s} — backing off ${wait}ms`);
         await sleep(wait);
         return request(cfg, false);
       }
@@ -114,93 +114,88 @@ async function runAutomation(
   emit("phase", { message: `Nuking ${lectures.length} lectures into oblivion...` });
 
   const total = lectures.length;
+  const durationCache = new Map(); // lec.id → seconds (fetched once, reused across rounds)
 
-  // Lectures to retry after the first pass.
-  // Only "maxed" (hit attempt cap) and "error" (network/server crash) are retryable.
-  // "skip" (zero duration) is a permanent data condition — retrying won't help.
-  const retryable = [];
-
-  async function doLecture(lec, idx, isRetry = false) {
-    if (lec.is_completed && !isRetry) {
+  // Separate already-done from lectures that need work
+  let pending = [];
+  for (let i = 0; i < lectures.length; i++) {
+    const lec = lectures[i];
+    if (lec.is_completed) {
       skipped++;
-      emit("lecture_done", { idx, total, title: lec.title, status: "skip", reason: "Already completed", completed, skipped });
-      return;
+      emit("lecture_done", { idx: i + 1, total, title: lec.title, status: "skip", reason: "Already completed", completed, skipped });
+    } else {
+      pending.push({ lec, idx: i + 1 });
     }
-    if (!isRetry) emit("lecture_start", { idx, total, title: lec.title });
+  }
+
+  /**
+   * Send exactly ONE progress POST for a lecture.
+   * Duration is fetched on first call and cached for all subsequent rounds.
+   * Returns: "done" | "skip" | "retry"
+   */
+  async function tryOnce({ lec, idx }) {
     try {
-      const detailRes = await request({
-        method: "GET",
-        url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}`,
-      });
-      const secs = parseDuration(detailRes.data.data.duration);
-
-      if (!secs) {
-        // Zero duration — VTU has no watchable content here; skip permanently.
-        if (!isRetry) {
-          skipped++;
-          emit("lecture_done", { idx, total, title: lec.title, status: "skip", reason: "VTU reported zero duration — no video content available for this lecture", completed, skipped });
-        }
-        return;
-      }
-
-      const payload = {
-        current_time_seconds: secs,
-        total_duration_seconds: secs,
-        seconds_just_watched: secs,
-      };
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // Throttle requests so VTU's server is not hammered
-        if (requestDelay > 0) await sleep(requestDelay);
-        const r = await request({
-          method: "POST",
-          url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}/progress`,
-          data: payload,
-          headers: { "Content-Type": "application/json" },
+      // Fetch + cache duration on first encounter
+      if (!durationCache.has(lec.id)) {
+        const detailRes = await request({
+          method: "GET",
+          url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}`,
         });
-        const { percent, is_completed } = r.data.data || {};
-        if (percent === 100 && is_completed) {
-          if (isRetry) skipped--; // undo the skipped count from the first pass
-          completed++;
-          emit("lecture_done", { idx, total, title: lec.title, status: "done", completed, skipped, retry: isRetry });
-          return;
-        }
+        durationCache.set(lec.id, parseDuration(detailRes.data.data.duration));
+      }
+      const secs = durationCache.get(lec.id);
+      if (!secs) {
+        // Zero duration — VTU has no watchable content; skip permanently.
+        skipped++;
+        emit("lecture_done", { idx, total, title: lec.title, status: "skip", reason: "VTU reported zero duration — no video content available for this lecture", completed, skipped });
+        return "skip";
       }
 
-      // Still not completed after all attempts
-      if (!isRetry) {
-        skipped++;
-        retryable.push({ lec, idx });
+      if (requestDelay > 0) await sleep(requestDelay);
+      const r = await request({
+        method: "POST",
+        url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}/progress`,
+        data: { current_time_seconds: secs, total_duration_seconds: secs, seconds_just_watched: secs },
+        headers: { "Content-Type": "application/json" },
+      });
+      const { percent, is_completed } = r.data.data || {};
+      if (percent === 100 && is_completed) {
+        completed++;
+        emit("lecture_done", { idx, total, title: lec.title, status: "done", completed, skipped });
+        return "done";
       }
-      const maxedReason = isRetry
-        ? `Still not marked complete after ${maxAttempts} attempts on retry — VTU may not be accepting progress for this lecture`
-        : `Did not reach 100% after ${maxAttempts} progress attempts — will retry`;
-      emit("lecture_done", { idx, total, title: lec.title, status: "maxed", reason: maxedReason, completed, skipped, retry: isRetry });
-    } catch (err) {
-      if (!isRetry) {
-        skipped++;
-        retryable.push({ lec, idx });
-      }
-      const errReason = isRetry
-        ? `Request failed on retry: ${err.message}`
-        : `Request failed: ${err.message} — will retry`;
-      emit("lecture_done", { idx, total, title: lec.title, status: "error", reason: errReason, completed, skipped, retry: isRetry });
+      // VTU accepted the request but hasn't marked it complete yet — retry next round
+      return "retry";
+    } catch (_err) {
+      // Network/server error — retry next round silently
+      return "retry";
     }
   }
 
-  for (let i = 0; i < total; i += batchSize) {
-    await Promise.all(
-      lectures.slice(i, i + batchSize).map((lec, j) => doLecture(lec, i + j + 1))
-    );
+  // ── Round-robin: one request per lecture per round ────────────────────────
+  // Each round sweeps ALL pending lectures once (in batches of batchSize).
+  // Lectures that complete or are skipped are dropped from pending.
+  // The full sweep of all other batches acts as the natural delay before
+  // VTU sees the same lecture again — no artificial sleeps between rounds needed.
+  //
+  // maxAttempts = maximum number of complete sweeps through pending lectures.
+  for (let round = 0; round < maxAttempts && pending.length > 0; round++) {
+    const nextPending = [];
+    for (let i = 0; i < pending.length; i += batchSize) {
+      const batch = pending.slice(i, i + batchSize);
+      const results = await Promise.all(batch.map(item => tryOnce(item)));
+      for (let j = 0; j < batch.length; j++) {
+        if (results[j] === "retry") nextPending.push(batch[j]);
+      }
+    }
+    pending = nextPending;
   }
 
-  // ── Retry pass ────────────────────────────────────────────────────────────
-  if (retryable.length > 0) {
-    emit("phase", { message: `Retrying ${retryable.length} stubborn lecture(s) that didn't stick first time...` });
-    for (let i = 0; i < retryable.length; i += batchSize) {
-      await Promise.all(
-        retryable.slice(i, i + batchSize).map(({ lec, idx }) => doLecture(lec, idx, true))
-      );
+  // Anything still pending after maxAttempts rounds — VTU refused to cooperate
+  if (pending.length > 0) {
+    emit("phase", { message: `${pending.length} lecture(s) couldn't be marked complete after ${maxAttempts} round(s). VTU is VTU.` });
+    for (const { lec, idx } of pending) {
+      emit("lecture_done", { idx, total, title: lec.title, status: "maxed", reason: `Did not reach 100% after ${maxAttempts} round(s)`, completed, skipped });
     }
   }
 
