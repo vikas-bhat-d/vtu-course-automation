@@ -118,8 +118,8 @@ function drainQueue() {
 
     if (type === "course_info") job.total = data.total;
     if (type === "lecture_done") {
-      job.processed = data.idx;
-      job.progress = job.total ? Math.round((data.idx / job.total) * 100) : 0;
+      job.processed = data.completed; // count of actually completed lectures, not position
+      job.progress = job.total ? Math.round((data.completed / job.total) * 100) : 0;
     }
 
     push(jobId, type, data);
@@ -419,6 +419,37 @@ app.get("/api/admin/config", adminLimit, adminAuth, (req, res) => {
 });
 
 
+
+// GET /api/admin/monitor?password=<pw>  — live queue inspector
+app.get("/api/admin/monitor", adminLimit, adminAuth, (_req, res) => {
+  const processing = [];
+  for (const [jobId, job] of jobs) {
+    if (job.status === "processing") {
+      const colonIdx = (job.dedupKey || "").indexOf(":");
+      const email  = colonIdx >= 0 ? job.dedupKey.slice(0, colonIdx) : "?";
+      const course = colonIdx >= 0 ? job.dedupKey.slice(colonIdx + 1) : "?";
+      processing.push({ jobId, email, course });
+    }
+  }
+
+  const queued = queue.map((item, i) => ({
+    num:    i + 1,
+    jobId:  item.jobId,
+    email:  item.config.email      || "?",
+    course: item.config.courseSlug || "?",
+  }));
+
+  if (processing.length === 0 && queued.length === 0) {
+    return res.json({ message: "No active or queued jobs.", processing: [], queued: [] });
+  }
+
+  res.json({
+    activeJobs:  processing.length,
+    queueLength: queued.length,
+    processing,
+    queued,
+  });
+});
 
 /**
  * On startup, reload any jobs that were queued/processing before the last
