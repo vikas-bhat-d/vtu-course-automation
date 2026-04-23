@@ -3,7 +3,7 @@
 https://online.vtu.ac.in/api/v1/auth/login
 POST
 payload
-{email: "vikasdbhat@gmail.com", password: "Vbd@777ok"}
+{email: "", password: ""}
 
 response
 {
