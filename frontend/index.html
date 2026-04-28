@@ -1493,9 +1493,9 @@
       case "lecture_done": {
         // Don't move the progress bar on retry — first-pass position stands
         if (!data.retry) {
-          jobProcessed = data.idx;
-          const pct = jobTotal ? Math.round((data.idx / jobTotal) * 100) : 0;
-          updateBar(pct, data.idx, jobTotal);
+          jobProcessed = data.completed;
+          const pct = jobTotal ? Math.round((data.completed / jobTotal) * 100) : 0;
+          updateBar(pct, data.completed, jobTotal);
         }
         const retryTag = data.retry ? " [retry]" : "";
         if (data.status === "done")
