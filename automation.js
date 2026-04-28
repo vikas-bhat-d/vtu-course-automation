@@ -27,7 +27,7 @@ function sleep(ms) {
  * @returns {Promise<{success: boolean, completed: number, skipped: number, total: number, error?: string}>}
  */
 async function runAutomation(
-  { email, password, courseSlug, batchSize = 10, maxAttempts = 50, retryDelay = 2000, requestDelay = 500 },
+  { email, password, courseSlug, batchSize = 10, maxAttempts = 50, retryDelay = 2000, requestDelay = 500, maxRetries = 10 },
   onProgress
 ) {
   const emit = (type, data) => { try { onProgress?.(type, data); } catch (_) {} };
@@ -39,29 +39,40 @@ async function runAutomation(
   let skipped = 0;
 
   // ── Auth ─────────────────────────────────────────────────────────────────
-  async function login() {
-    const res = await http.post(`${VTU_API}/auth/login`, { email, password });
-    sessionValid = true;
-    emit("log", { text: `✓ Logged in as ${res.data.data.name}`, level: "success" });
+  async function login(retriesLeft = maxRetries) {
+    try {
+      const res = await http.post(`${VTU_API}/auth/login`, { email, password });
+      sessionValid = true;
+      emit("log", { text: `✓ Logged in as ${res.data.data.name}`, level: "success" });
+    } catch (err) {
+      const s = err.response?.status;
+      if (retriesLeft > 0 && (s === 500 || s === 503 || s === 429)) {
+        const wait = retryDelay > 0 ? retryDelay : 2000;
+        console.warn(`[vtu] login ${s} — backing off ${wait}ms (${retriesLeft} retries left)`);
+        await sleep(wait);
+        return login(retriesLeft - 1);
+      }
+      throw err;
+    }
   }
 
-  async function request(cfg, retry = true) {
+  async function request(cfg, retriesLeft = maxRetries) {
     if (!sessionValid) await login();
     try {
       return await http(cfg);
     } catch (err) {
       const s = err.response?.status;
-      if (retry && (s === 401 || s === 419 || s === 403)) {
+      if (retriesLeft > 0 && (s === 401 || s === 419 || s === 403)) {
         sessionValid = false;
         await login();
-        return request(cfg, false);
+        return request(cfg, retriesLeft - 1);
       }
-      // VTU server is overloaded — back off and retry once silently
-      if (retry && (s === 500 || s === 503 || s === 429)) {
+      // VTU server is overloaded — back off and retry
+      if (retriesLeft > 0 && (s === 500 || s === 503 || s === 429)) {
         const wait = retryDelay > 0 ? retryDelay : 2000;
-        console.warn(`[vtu] ${s} — backing off ${wait}ms`);
+        console.warn(`[vtu] ${s} — backing off ${wait}ms (${retriesLeft} retries left)`);
         await sleep(wait);
-        return request(cfg, false);
+        return request(cfg, retriesLeft - 1);
       }
       throw err;
     }
@@ -143,7 +154,7 @@ async function runAutomation(
         const detailRes = await request({
           method: "GET",
           url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}`,
-        });
+        }, 1);
         durationCache.set(lec.id, parseDuration(detailRes.data.data.duration));
       }
       const secs = durationCache.get(lec.id);
@@ -155,12 +166,13 @@ async function runAutomation(
       }
 
       if (requestDelay > 0) await sleep(requestDelay);
+      // Pass retriesLeft=1 so the round-robin handles retries, not request() internally
       const r = await request({
         method: "POST",
         url: `${VTU_API}/student/my-courses/${courseSlug}/lectures/${lec.id}/progress`,
         data: { current_time_seconds: secs, total_duration_seconds: secs, seconds_just_watched: secs },
         headers: { "Content-Type": "application/json" },
-      });
+      }, 1);
       const { percent, is_completed } = r.data.data || {};
       if (percent === 100 && is_completed) {
         completed++;

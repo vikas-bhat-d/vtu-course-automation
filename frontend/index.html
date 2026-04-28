@@ -1212,8 +1212,9 @@
 
   let currentJobId = null;
   let sseSource    = null;
-  let jobTotal     = 0;
-  let jobProcessed = 0;
+  let jobTotal       = 0;
+  let jobProcessed   = 0;
+  let jobAlreadyDone = 0; // lectures already completed before this run
   let githubUrl    = "https://github.com/vikas-bhat-d/vtu-course-automation";
   let isCompleted  = false;
 
@@ -1440,7 +1441,7 @@
       setFormLoading(false);
       document.getElementById("submitForm").reset();
       clearLog();
-      jobTotal = jobProcessed = 0;
+      jobTotal = jobProcessed = jobAlreadyDone = 0;
       isCompleted = false;
     });
   }
@@ -1471,7 +1472,7 @@
   }
 
   function handleSnapshot(snap) {
-    jobTotal = snap.total || 0; jobProcessed = snap.processed || 0;
+    jobTotal = snap.total || 0; jobProcessed = snap.processed || 0; jobAlreadyDone = 0;
     updateBar(snap.progress || 0, snap.processed || 0, snap.total || 0);
     (snap.logs || []).forEach(({ type, data }) => handleEvent(type, data, true));
     if (snap.status === "done" && snap.result) onComplete(snap.result);
@@ -1485,6 +1486,7 @@
       case "log":         appendLog(data.text, data.level || "log"); break;
       case "course_info":
         jobTotal = data.total;
+        jobAlreadyDone = 0;
         appendLog(`"${data.title}" &mdash; ${data.total} lectures queued`, "success");
         updateBar(0, 0, data.total);
         const h = Math.round(data.total * 20 / 60);
@@ -1493,9 +1495,11 @@
       case "lecture_done": {
         // Don't move the progress bar on retry — first-pass position stands
         if (!data.retry) {
-          jobProcessed = data.completed;
-          const pct = jobTotal ? Math.round((data.completed / jobTotal) * 100) : 0;
-          updateBar(pct, data.completed, jobTotal);
+          if (data.status === "skip" && data.reason === "Already completed") jobAlreadyDone++;
+          const effective = data.completed + jobAlreadyDone;
+          jobProcessed = effective;
+          const pct = jobTotal ? Math.round((effective / jobTotal) * 100) : 0;
+          updateBar(pct, effective, jobTotal);
         }
         const retryTag = data.retry ? " [retry]" : "";
         if (data.status === "done")

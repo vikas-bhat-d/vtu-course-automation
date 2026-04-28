@@ -42,6 +42,7 @@ const runtimeConfig = {
   maxAttempts:    parseInt(process.env.DEFAULT_MAX_ATTEMPTS) || 50,
   retryDelay:     parseInt(process.env.RETRY_DELAY_MS)       || 2000,
   requestDelay:   parseInt(process.env.REQUEST_DELAY_MS)     || 500,
+  maxRetries:     parseInt(process.env.MAX_RETRIES)          || 10,
 };
 
 // ── Notification state ───────────────────────────────────────────────────────
@@ -120,15 +121,20 @@ function drainQueue() {
     maxAttempts:  runtimeConfig.maxAttempts,
     retryDelay:   runtimeConfig.retryDelay,
     requestDelay: runtimeConfig.requestDelay,
+    maxRetries:   runtimeConfig.maxRetries,
   }, (type, data) => {
     // Keep a rolling 200-entry log for late-joiners to replay
     job.logs.push({ type, data, ts: Date.now() });
     if (job.logs.length > 200) job.logs.shift();
 
-    if (type === "course_info") job.total = data.total;
+    if (type === "course_info") { job.total = data.total; job._alreadyDone = 0; }
     if (type === "lecture_done") {
-      job.processed = data.completed; // count of actually completed lectures, not position
-      job.progress = job.total ? Math.round((data.completed / job.total) * 100) : 0;
+      if (!data.retry) {
+        if (data.status === "skip" && data.reason === "Already completed") job._alreadyDone = (job._alreadyDone || 0) + 1;
+        const effective = data.completed + (job._alreadyDone || 0);
+        job.processed = effective;
+        job.progress = job.total ? Math.round((effective / job.total) * 100) : 0;
+      }
     }
 
     push(jobId, type, data);
@@ -403,6 +409,7 @@ const CONFIG_BOUNDS = {
   maxAttempts:    [1, 500],
   retryDelay:     [0, 30_000],
   requestDelay:   [0, 10_000],
+  maxRetries:     [1, 30],
 };
 
 // GET /api/admin/config?password=<pw>[&key=value...]

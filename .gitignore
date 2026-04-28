@@ -22,3 +22,6 @@ Thumbs.db
 # Project specific
 credentials.json
 oec-pec-automation-data.json
+oec-pec.txt
+
+scripts
