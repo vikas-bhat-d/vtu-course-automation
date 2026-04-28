@@ -193,13 +193,15 @@ app.use(cors({
 app.use(express.json({ limit: "10kb" }));
 app.use(express.static(path.join(__dirname, "frontend")));
 
-const submitLimit = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many requests. Even VTU has a rate limit (sort of)." },
-});
+const submitLimit = process.env.NODE_ENV === "production"
+  ? rateLimit({
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { error: "Too many requests. Even VTU has a rate limit (sort of)." },
+    })
+  : (_req, _res, next) => next(); // disabled in local/dev
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 

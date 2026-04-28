@@ -199,6 +199,7 @@ async function sendProgressUpdate(lectureId, durationSeconds) {
         };
     } catch (err) {
         console.error(`  ✗ Failed to send progress update for lecture ${lectureId}`);
+        exit(0)
         return null;
     }
 }
