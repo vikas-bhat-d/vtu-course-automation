@@ -6,7 +6,7 @@ const { configDotenv } = require("dotenv");
 const tough = require("tough-cookie");
 configDotenv()
 
-const VTU_API = process.env.VTU_API_BASE_URL 
+const VTU_API = process.env.VTU_API_BASE_URL || "https://online.vtu.ac.in/api/v1" 
 
 
 /** Pause execution for `ms` milliseconds. */
