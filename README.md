@@ -20,12 +20,14 @@
   - [How It Works](#how-it-works)
     - [Skip reasons](#skip-reasons)
   - [Usage](#usage)
+    - [Which mode should I use?](#which-mode-should-i-use)
     - [Web UI *(recommended)*](#web-ui-recommended)
     - [CLI *(requires `.env`)*](#cli-requires-env)
     - [Dev mode (auto-reload)](#dev-mode-auto-reload)
   - [Configuration Reference](#configuration-reference)
   - [REST API](#rest-api)
   - [Troubleshooting](#troubleshooting)
+  - [Admin Endpoints](#admin-endpoints)
   - [Project Structure](#project-structure)
   - [Tech Stack](#tech-stack)
   - [Security](#security)
@@ -113,12 +115,31 @@ Every skipped lecture now tells you exactly why:
 
 ## Usage
 
+### Which mode should I use?
+
+| Mode | Use When | Privacy | Setup Needed |
+|------|----------|---------|-------------|
+| **Web UI** ✨ *(Recommended)* | You want the easiest experience | Credentials in memory only, never stored | Just run `npm run serve` |
+| **CLI** | Scripting or automating locally | Credentials stored in `.env` file | Need to create `.env` file |
+| **Dev mode** | Contributing to the project | N/A | For developers only |
+
 ### Web UI *(recommended)*
 ```bash
 npm run serve
 # Open http://localhost:3000
 ```
 Fill in email, password, course slug → submit → watch the live log.
+
+**Finding your course slug:**
+1. Login to https://online.vtu.ac.in
+2. Go to "My Courses" and open a course
+3. Look at the URL: `https://online.vtu.ac.in/courses/1-social-networks`
+4. The slug is the part after `/courses/`: **`1-social-networks`**
+
+Common mistakes:
+- ❌ `Social Networks` (spaces, wrong format)
+- ❌ `1` (incomplete)
+- ✅ `1-social-networks` (correct)
 
 ### CLI *(requires `.env`)*
 ```bash
@@ -140,12 +161,22 @@ npm run dev
 | `VTU_EMAIL` | — | CLI only | VTU account email |
 | `VTU_PASSWORD` | — | CLI only | VTU account password |
 | `VTU_COURSE_SLUG` | `1-social-networks` | CLI only | Course URL slug |
+| `VTU_API_BASE_URL` | `https://online.vtu.ac.in/api/v1` | Optional | VTU API base URL |
 | `VTU_BATCH_SIZE` | `10` | Optional | Lectures processed in parallel per batch |
 | `VTU_MAX_ATTEMPTS` | `50` | Optional | Max progress-push attempts per lecture |
 | `PORT` | `3000` | Optional | Server port |
-| `MAX_CONCURRENT` | `2` | Optional | Max concurrent jobs (hosted only) |
+| `CORS_ORIGIN` | `*` | Optional | Allowed CORS origin for frontend |
+| `GITHUB_URL` | — | Optional | GitHub repo URL shown in UI |
 | `KV_REST_API_URL` | — | Optional | Upstash Redis URL (statistics only) |
-| `KV_REST_API_TOKEN` | — | Optional | Upstash Redis token |
+| `KV_REST_API_TOKEN` | — | Optional | Upstash Redis token (statistics only) |
+| `DEFAULT_BATCH_SIZE` | `10` | Optional | Server default batch size (1-50) |
+| `DEFAULT_MAX_ATTEMPTS` | `50` | Optional | Server default max attempts (1-500) |
+| `RETRY_DELAY_MS` | `2000` | Optional | Retry delay in milliseconds (0-30000) |
+| `REQUEST_DELAY_MS` | `500` | Optional | Request delay in milliseconds (0-10000) |
+| `MAX_RETRIES` | `10` | Optional | Max retry attempts for errors (1-30) |
+| `MAX_CONCURRENT` | `2` | Optional | Max concurrent jobs (1-10, hosted only) |
+| `ADMIN_PASSWORD` | — | Optional | Enable admin endpoints for runtime config |
+| `NODE_ENV` | `development` | Optional | Set to `production` for stricter rate limiting |
 
 > **Web server / REST API:** credentials are passed in the request body — no `.env` needed.  
 > **CLI:** credentials must be in `.env`.
@@ -154,7 +185,7 @@ npm run dev
 
 ## REST API
 
-**POST** `/api/jobs` — Submit a job
+**POST** `/api/submit` — Submit a job
 ```json
 {
   "email": "you@gmail.com",
@@ -165,25 +196,28 @@ npm run dev
 }
 ```
 
-**GET** `/api/jobs/:jobId` — Poll job state
+**Response:**
 ```json
 {
-  "id": "uuid",
-  "status": "processing",
-  "progress": 45,
-  "total": 166,
-  "processed": 75,
-  "logs": [...]
+  "success": true,
+  "jobId": "uuid-here",
+  "message": "Job queued"
 }
 ```
 
-**GET** `/api/jobs/:jobId/stream` — SSE stream (real-time events)
+**GET** `/api/status/:jobId` — SSE stream (real-time events)
 ```
+event: phase
+data: {"message":"Sneaking past VTU's login page..."}
+
 event: lecture_done
-data: {"idx":12,"total":166,"title":"Introduction","status":"skip","reason":"VTU reported zero duration — no video content available for this lecture"}
+data: {"idx":12,"total":166,"title":"Introduction","status":"skip","reason":"VTU reported zero duration — no video content available for this lecture","completed":11,"skipped":1}
 
 event: done
 data: {"completed":120,"skipped":46,"total":166}
+
+event: failed
+data: {"message":"Invalid credentials"}
 ```
 
 ---
@@ -196,8 +230,48 @@ data: {"completed":120,"skipped":46,"total":166}
 | `Course not found` | Verify the slug from the VTU URL (e.g. `1-social-networks`) |
 | Lectures stuck at `maxed` | VTU API may be throttling — try a smaller `batchSize` (e.g. `5`) or increase `maxAttempts` |
 | `Network error` / `ECONNRESET` | Transient VTU outage — these are auto-retried; if persistent, try again later |
-| Port 3000 already in use | Set `PORT=3001` in your environment before running |
+| Port 3000 already in use | **macOS/Linux/WSL:** `PORT=3001 npm run serve`<br>**Windows (PowerShell):** `$env:PORT=3001; npm run serve`<br>**Or** create `.env` file with: `PORT=3001` |
 | Hosted site down | **Run it locally** — see [Run It Yourself](#-run-it-yourself-service-down-no-problem) above |
+
+---
+
+## Admin Endpoints
+
+If you set `ADMIN_PASSWORD` in `.env`, you can modify server behavior at runtime without restarting:
+
+**GET** `/api/admin/config?password=<pw>&key=value...` — View/update runtime settings
+
+Available configuration keys:
+- `maxConcurrent`: Max concurrent jobs (1-10, default: 2)
+- `batchSize`: Lectures per batch (1-50, default: 10)
+- `maxAttempts`: Max retry rounds (1-500, default: 50)
+- `retryDelay`: Backoff delay in ms (0-30000, default: 2000)
+- `requestDelay`: Request spacing in ms (0-10000, default: 500)
+- `maxRetries`: Max retry attempts (1-30, default: 10)
+
+Examples:
+```bash
+# View current config
+curl 'http://localhost:3000/api/admin/config?password=yourpass'
+
+# Update batch size and max attempts
+curl 'http://localhost:3000/api/admin/config?password=yourpass&batchSize=20&maxAttempts=100'
+```
+
+**GET** `/api/admin/monitor?password=<pw>` — Live queue inspector
+
+Shows all queued jobs, running jobs, and current server configuration.
+
+**GET** `/api/admin/notification?password=<pw>&message=...&disabled=...` — Global notification banner
+
+Set a maintenance message shown to all users on the web UI:
+```bash
+# Enable a notification
+curl 'http://localhost:3000/api/admin/notification?password=yourpass&message=Maintenance%20in%2010%20mins'
+
+# Disable notification
+curl 'http://localhost:3000/api/admin/notification?password=yourpass&disabled=true'
+```
 
 ---
 
