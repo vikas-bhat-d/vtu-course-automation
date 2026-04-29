@@ -271,6 +271,17 @@ app.post("/api/submit", submitLimit, async (req, res) => {
     createdAt: Date.now(),
   });
 
+  // Memory leak guard: cap at 1000 to prevent unbounded memory growth under heavy load
+  if (jobs.size > 1000) {
+    for (const [id, j] of jobs) {
+      if (jobs.size <= 1000) break;
+      // Evict oldest inactive jobs first (Map iteration order is insertion order)
+      if (j.status === "done" || j.status === "failed") {
+        jobs.delete(id);
+      }
+    }
+  }
+
   activeJobKeys.set(dedupKey, jobId);
 
   // Fire-and-forget: increment student counter in Redis
