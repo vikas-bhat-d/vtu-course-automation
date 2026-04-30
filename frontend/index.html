@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -1446,6 +1446,8 @@
     });
   }
 
+  let reconnectAttempts = 0;
+
   function connectToJob(jobId) {
     if (sseSource) { sseSource.close(); sseSource = null; }
 
@@ -1464,11 +1466,20 @@
 
     ["snapshot","phase","log","course_info","lecture_start","lecture_done","complete","done","failed","queue_pos","status"]
       .forEach(evt => sseSource.addEventListener(evt, e => {
+        reconnectAttempts = 0; // reset on any successful event
         if (evt === "snapshot") handleSnapshot(JSON.parse(e.data));
         else handleEvent(evt, JSON.parse(e.data));
       }));
 
-    sseSource.onerror = () => { if (isCompleted) sseSource.close(); };
+    sseSource.onerror = () => {
+      if (isCompleted) { sseSource.close(); return; }
+      sseSource.close();
+      sseSource = null;
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 15000);
+      reconnectAttempts++;
+      appendLog(`Connection lost. Reconnecting in ${Math.round(delay / 1000)}s...`, "warn");
+      setTimeout(() => connectToJob(currentJobId), delay);
+    };
   }
 
   function handleSnapshot(snap) {
